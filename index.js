@@ -35717,7 +35717,6 @@ function makeDraggable(panel, handle, keys = { left: 'winLeft', top: 'winTop' },
         const r = panel.getBoundingClientRect();
         sx = e.clientX; sy = e.clientY; sl = r.left; st = r.top;
         sw = r.width; sh = r.height;      // 起拖时的面板尺寸 → 决定「至少留多少在屏内」（见 keepFor）
-        panel.style.right = 'auto';
         document.body.style.userSelect = 'none';
         // 指针捕获【推迟】到真正起拖那一刻（见 pointermove）。若在此处 pointerdown 就捕获，桌面鼠标
         // 会把补发的 click 重定向到被捕获的 handle、绕过折叠药丸下方的展开按钮 → 「🧭 小罗盘点了不展开」
@@ -35728,6 +35727,9 @@ function makeDraggable(panel, handle, keys = { left: 'winLeft', top: 'winTop' },
         if (!moved && !dragExceededThreshold(e.clientX - sx, e.clientY - sy, fromButton)) return; // 阈值内仍算轻点，先不动
         if (!moved) {                     // 头一次越过阈值 = 真起拖：此刻才捕获指针（纯轻点走不到这里）
             moved = true;
+            // Keep the right anchor on taps; switch anchors only after a real drag.
+            // Otherwise an unset left makes the float jump behind the sidebar before click.
+            panel.style.right = 'auto';
             try { handle.setPointerCapture(pid); } catch (_) { /* ignore */ }
         }
         const p = clampDragPos(
