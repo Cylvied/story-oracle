@@ -1764,12 +1764,12 @@ const ENABLE_NEXT_BEAT = true;
 const ENABLE_FIX_CUSTOM_TASK = true;
 
 // 🌐 模板广场（1.86.0，spec docs/superpowers/specs/2026-09-24-fix-template-hub-design.md）：自定义模板的
-// 共享广场——从 GitHub（经 jsDelivr）读、下载。关 = 🌐 广场按钮不渲染、从不联网、设置不动（defaults 里不出现
-// fixHubInstalled 键）。读点：defaults · 🌐 广场按钮 + 绑定 · fixHubLibraryUrlsDefault · openFixHub。
-// 2026-09-28 暂关（Prince）：GitHub 账号被停用，疑与 Worker 用个人令牌代发 Issue 有关。
-// 2026-09-29「提交分享」（经 Worker 往 GitHub 开 Issue）整段移除（Prince）；📤 分享卡只剩「复制分享文本」（纯本地、
-// 不联网、不受本旗管）。加回投稿：docs/agent/removed/fix-hub-submit/README.md（含可反向套用的补丁）。
-const ENABLE_FIX_TEMPLATE_HUB = false;
+// 共享广场——从 GitHub（经 jsDelivr）读、经 Cloudflare Worker 投稿、Prince 审核后发布。关 = 两个按钮不渲染、
+// 从不联网、设置不动（defaults 里不出现 fixHubInstalled 键），与 1.85.3 逐字节相同。
+// 读点：defaults · 自定义面板模板行两个按钮 + 绑定 · fixHubWorkerUrl · fixHubLibraryUrlsDefault · openFixHub / openFixShare。
+// 2026-09-28 暂关（GitHub 账号被停用，疑与 Worker 用个人令牌代发 Issue 有关）；2026-11-01 重开（Prince）：整条链改为
+// 全在 Cloudflare、完全不碰 GitHub——读写都只去 FIX_HUB_BASE（templates.fabschoolcard.bid），审核在 Worker 自带的管理页。
+const ENABLE_FIX_TEMPLATE_HUB = true;
 
 // 自动诊断总开关（用户功能请求；实验性——它是唯一会【自动写入 MVU 游戏状态】的功能，故配真正的杀死开关）。
 // === 出问题时的一键回退：把这一行改成 false ===（无需动其它代码）。关掉时：
@@ -2078,7 +2078,7 @@ const ENABLE_CUSTOM_PERSONAS = true;
 // —— 更新提醒（1.38.0）——
 // SO_VERSION 是代码内唯一版本号，必须与 manifest.json 的 version 完全一致——update-check.test.mjs
 // 有失配即红的漂移钉（发版清单：两处一起 bump）。
-const SO_VERSION = '1.89.0';
+const SO_VERSION = '1.90.0';
 // 更新提醒总开关。false → 设置面板不渲染「更新」组、开窗不检查、红点绘制器与一键更新 no-op、
 // 绑定/回填跳过——字节级零行为变化。运行期另有 opt-out 设置 updAutoCheck（默认开）。
 const ENABLE_UPDATE_CHECK = true;
@@ -2209,6 +2209,9 @@ const defaults = {
     // 直连「地址原样使用」（1.22.0，原生化自二创「最终模式」）：裸地址不再自动补 /v1——请求打到
     // 地址/chat/completions、获取模型打到 地址/models。路径特殊的中转站用。默认关 = 旧行为字节不变。
     directRawUrl: false,
+    // 🔀 提示词后处理（opt-in，ST「提示词后处理」同款 merge/semi/strict）：'' = 未选择 = 出站字节不变。
+    // 起因：literouter gemini 只读第一条 system、其余 system 静默丢弃 → 普通聊天看不到前文（2026-10-13 实测）。
+    promptPostProcessing: '',
     // 附加参数（1.70.0，仿 ST「自定义（兼容 OpenAI）」源的同名面板；用户反馈：DS 类中转要传
     // enable_thinking: false 等关思维链参数，神谕请求体是写死的没处填）：三份原始文本（YAML 或 JSON），
     // 随每次请求附加 / 剔除主体参数、附加请求头。直连两条路全生效；profile 路仅「自定义（兼容 OpenAI）」
@@ -6828,7 +6831,10 @@ function fixTagOverlap(keepTags, dropTags) {
  * （test/fixtures/submission-cases.json）钉住；改一边必须同改另一边 + 夹具。
  * 广场来的一切文字都是【不可信】的：本层只做解析与校验，渲染层一律 textContent。
  * ------------------------------------------------------------------ */
-const FIX_HUB_REPO = 'namelessone88/story-oracle-templates';
+// 模板广场唯一的服务地址（2026-11-01 起全在 Cloudflare：Prince 自己的域名，不再经 GitHub / jsDelivr）。
+// 读库 = GET <base>/library.json；投稿 = POST <base>/submit。扩展里所有往外发的广场请求只许去这里（fix-hub.test.mjs 钉）。
+// Worker 源码：story-oracle-templates/worker/；设计稿 docs/superpowers/specs/2026-11-01-template-hub-cloudflare-design.md
+const FIX_HUB_BASE = 'https://templates.fabschoolcard.bid';
 const FIX_HUB_MARKER = '<!-- SO-TEMPLATE v1 -->';
 const FIX_HUB_LIMITS = Object.freeze({ name: 40, prompt: 8000, description: 200, author: 30, model: 60, client: 20, tagsMin: 1, tagsMax: 3 });
 const FIX_HUB_ERR_TEXT = Object.freeze({
@@ -6848,6 +6854,7 @@ const FIX_HUB_ERR_TEXT = Object.freeze({
 });
 const fixHubIdRe = /^t\d{4,}$/;
 let fixHubSkipWarned = false;   // 坏条目只 console.warn 一次（spec §5）
+let fixHubTestWorkerUrl = null;   // 只给测试 / smoke 用（StoryOracleAPI.unsafe.eval 赋值）：null = 用正式地址；字符串（含空串 = 模拟未开通）= 覆盖
 
 // 清洗口径（与仓库 clean 逐条相同）：孤立代理 → U+FFFD、CRLF / CR → LF、去 C0/C1 控制字符（留 \t \n）。
 function fixHubClean(s) {
@@ -7006,18 +7013,21 @@ function fixHubPruneInstalled(installed, localNames) {
     return out;
 }
 
-// 三个读取镜像，按序试（spec §4.1）。
-function fixHubLibraryUrls(repo) {
-    return [
-        `https://testingcf.jsdelivr.net/gh/${repo}@main/dist/library.json`,
-        `https://cdn.jsdelivr.net/gh/${repo}@main/dist/library.json`,
-        `https://raw.githubusercontent.com/${repo}/main/dist/library.json`,
-    ];
+// 读取地址表（加载器照旧支持多个、取 generatedAt 最新的那份；2026-11-01 起只有一个：Prince 的域名，按他的裁定不留 GitHub 备份）。
+function fixHubLibraryUrls(base) {
+    return [`${String(base || '').replace(/\/+$/, '')}/library.json`];
+}
+
+// 投稿地址：旗关恒空；测试覆盖优先；去尾斜杠。空 = 分享卡不渲染「提交分享」。
+function fixHubWorkerUrl() {
+    if (!ENABLE_FIX_TEMPLATE_HUB) return '';
+    const u = fixHubTestWorkerUrl !== null ? fixHubTestWorkerUrl : FIX_HUB_BASE;
+    return String(u || '').replace(/\/+$/, '');
 }
 
 // 广场卡读这一个；旗关 = 空表 = 永不联网。
 function fixHubLibraryUrlsDefault() {
-    return ENABLE_FIX_TEMPLATE_HUB ? fixHubLibraryUrls(FIX_HUB_REPO) : [];
+    return ENABLE_FIX_TEMPLATE_HUB ? fixHubLibraryUrls(FIX_HUB_BASE) : [];
 }
 
 /* ------------------------------------------------------------------ *
@@ -7046,10 +7056,10 @@ function fixHubLibTime(lib) {
     return Number.isFinite(t) ? t : 0;
 }
 
-// 三个镜像【同时】问，取 generatedAt 最新的那份合法广场（1.86.0 真机实测：testingcf 镜像是独立缓存、
-// 发布后的清缓存够不着它，按顺序取第一份会一直拿到旧的空广场）。并列时按镜像顺序优先。
+// 地址表里的每一处【同时】问，取 generatedAt 最新的那份合法广场。2026-11-01 起表里只有 FIX_HUB_BASE 一处；
+// 多地址取最新的逻辑留着（1.86.0 实测：jsDelivr 的 testingcf 镜像是清不掉的独立缓存，按顺序取第一份会一直拿旧的）。
 // 200 但不是合法广场（HTML 门户页等）= 这一路失败；没有任何合法广场、且有一路回了不认识的 schema 号 =
-// 真广场出了新格式 → 不写缓存。网上拿到的比本地缓存还旧（只连得上陈旧镜像）→ 继续用缓存那份、不回写。
+// 真广场出了新格式 → 不写缓存。网上拿到的比本地缓存还旧（边缘缓存 / 代理回了旧的）→ 继续用缓存那份、不回写。
 // 全失败 → 回缓存（source:'cache'）；连缓存都没有 → unreachable。
 async function fixHubLoadLibrary({ force = false } = {}) {
     if (!force && fixHubState.lib) return { ok: true, lib: fixHubState.lib, source: fixHubState.source, fetchedAt: fixHubState.fetchedAt };
@@ -7309,12 +7319,12 @@ function closeFixHub() {
 }
 
 /* ------------------------------------------------------------------ *
- * 📤 分享（1.86.0）——表单 / 复制分享文本（发到 Discord）。2026-09-29 起只剩复制：「提交分享」（经 Worker
- * 往 GitHub 开 Issue）已移除，见 docs/agent/removed/fix-hub-submit/README.md。复制纯本地、不联网、不受
- * ENABLE_FIX_TEMPLATE_HUB 管；旗开时开卡会顺带读广场（现行标签表 + 「更新」下拉），旗关只用内置标签表。
+ * 📤 分享（1.86.0）——表单 / 提交（经 Worker）/ 复制分享文本（Discord 兜底）。
+ * Worker 回执同样不可信：只按 error / field / code 查我们自己的文案表，回执里的文字一个字都不上屏。
  * ------------------------------------------------------------------ */
 const FIX_HUB_AUTHOR_KEY = 'so-fixhub-author-v1';
 const FIX_HUB_TAGS_FALLBACK = ['去AI味', '润色文风', '翻译', '格式整理', '视角人称', '扩写补写', '精简', '其他'];
+const FIX_HUB_REASON_TEXT = Object.freeze({ network: '连不上分享服务', upstream: '分享服务暂时出错', too_large: '内容太大', bad_json: '内容格式不对', not_found: '分享服务地址不对', queue_full: '待审核的投稿太多了，过几天再试', unknown: '未知原因' });
 let fixShareOpenSeq = 0;   // 每次开卡 +1：开卡时的异步拉取回来晚了（卡已关 / 已重开）就不再往卡上写
 
 // '' = 可以分享；否则 = 为什么不行（点 📤 时以 toast 说明）。
@@ -7329,8 +7339,41 @@ function fixHubShareBlockedReason(name, s, dirty) {
     return '';
 }
 
+// Worker 回执 → { ok, text }。只认带合法 ref（Worker 生成的投稿号，形如 s…）的成功；回执是不可信文字，ref 不进文案。
+// 错误码按自家表查（own-key，撞原型属性名也落「未知原因」）。
+function fixHubSubmitResultText(status, body, networkError) {
+    const fail = (why) => ({ ok: false, text: `提交没成功（${why}）——可以点「复制分享文本」发到 Discord。` });
+    if (networkError) return fail(FIX_HUB_REASON_TEXT.network);
+    if (body && body.ok === true && typeof body.ref === 'string' && /^s[0-9a-z]{6,40}$/.test(body.ref)) return { ok: true, text: '已提交，审核通过后会出现在广场里' };
+    const code = body && typeof body.error === 'string' ? body.error : '';
+    if (code === 'rate') return { ok: false, text: '今天分享次数到上限了，明天再来' };
+    if (code === 'invalid' && Array.isArray(body.errors)) {
+        const lines = [...new Set(body.errors.map((e) => fixHubFieldMessage(String(e && e.field), String(e && e.code))))];
+        if (lines.length) return fail(lines.join('；'));
+    }
+    return fail(Object.prototype.hasOwnProperty.call(FIX_HUB_REASON_TEXT, code) ? FIX_HUB_REASON_TEXT[code] : FIX_HUB_REASON_TEXT.unknown);
+}
+
 function fixHubShareText(value) {
     return '把这段发到神谕 Discord 的模板分享频道\n' + fixHubBuildShareBlock(value);
+}
+
+// POST <worker>/submit，15 s 超时。地址为空（Worker 未开通）按「连不上」处理——正常 UI 下提交按钮本就不渲染。
+async function fixHubSubmit(value) {
+    const base = fixHubWorkerUrl();
+    if (!base) return fixHubSubmitResultText(0, null, true);
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 15000);
+    try {
+        const res = await fetch(base + '/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value), signal: ctl.signal });
+        let body = null;
+        try { body = await res.json(); } catch (e) { body = null; }
+        return fixHubSubmitResultText(res.status, body, false);
+    } catch (e) {
+        return fixHubSubmitResultText(0, null, true);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function fixHubShareCollect(el, tags, knownIds) {
@@ -7356,7 +7399,7 @@ function fixHubShareErrorLines(errors) {
     return [...new Set(errors.map((x) => fixHubFieldMessage(x.field, x.code)))];
 }
 
-// 复制前的整表检查：勾了「更新」却没选条目 → 拦下（不复制）；否则走提交规则（与仓库 lib 同一张夹具表）。
+// 提交 / 复制前的整表检查：勾了「更新」却没选条目 → 拦下（不发、不复制）；否则走提交规则。
 // 返回 { ok:true, value } | { ok:false, lines }（lines = 行内报错文案）。
 function fixHubShareCheck(el) {
     if (el.querySelector('#so-fixshare-isupdate').checked && !el.querySelector('#so-fixshare-updateof').value) {
@@ -7434,12 +7477,13 @@ function buildFixShareCard() {
         '<label class="so-fixshare-label">测试过的模型<input id="so-fixshare-model" type="text"></label>' +
         '<label class="so-check so-lb-check" id="so-fixshare-isupdate-row"><input id="so-fixshare-isupdate" type="checkbox"><span>这是对已分享模板的更新</span></label>' +
         '<select id="so-fixshare-updateof" hidden></select>' +
-        '<div class="so-hint">点「复制分享文本」，把复制到的内容发到神谕 Discord 的模板分享频道。分享出去的模板是公开的，任何人都能拿去用。</div>' +
+        '<div class="so-hint">分享后模板公开，任何人都能下载使用；审核通过后才会出现在广场里。</div>' +
         '<div id="so-fixshare-errors" class="so-hint so-fixshare-errors" hidden></div>' +
         '<textarea id="so-fixshare-copybox" rows="4" readonly hidden></textarea>' +
         '</div>' +
         '<div id="so-fixshare-btns">' +
-        '<button type="button" id="so-fixshare-copy" class="so-fixhub-btn so-fixshare-go">复制分享文本</button>' +
+        '<button type="button" id="so-fixshare-copy" class="so-fixhub-btn">复制分享文本</button>' +
+        '<button type="button" id="so-fixshare-submit" class="so-fixhub-btn so-fixshare-go">提交分享</button>' +
         '</div></div>';
     win.appendChild(el);
     el.addEventListener('click', (e) => { if (e.target === el) closeFixShare(); });   // 点遮罩关闭
@@ -7456,13 +7500,24 @@ function buildFixShareCard() {
         fixHubShowErrors(el, []);
         await fixHubCopy(el, r.value);
     });
+    el.querySelector('#so-fixshare-submit').addEventListener('click', async (e) => {
+        const r = fixHubShareCheck(el);
+        if (!r.ok) { fixHubShowErrors(el, r.lines); return; }
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        const res = await fixHubSubmit(r.value);
+        btn.disabled = false;
+        fixHubShowErrors(el, res.ok ? [] : [res.text]);
+        el.querySelector('#so-fixshare-copy').classList.toggle('so-fixshare-go', !res.ok);   // 失败 → 高亮兜底按钮
+        if (res.ok) { if (typeof toastr !== 'undefined') toastr.success(res.text); closeFixShare(); }
+    });
     return el;
 }
 
 // 开卡：不可分享 → toast 说明原因、不开；可分享 → 立刻用内置标签表开卡（不等网络），广场拉回来后换成现行
-// 标签表 + 填「更新」下拉；拉不到（旗关 = 从不联网；或无缓存）→ 保留内置表、隐藏「更新」勾选。
+// 标签表 + 填「更新」下拉；拉不到（且无缓存）→ 保留内置表、隐藏「更新」勾选（Worker 仍会按现行表复核）。
 async function openFixShare() {
-    if (!win) return;
+    if (!ENABLE_FIX_TEMPLATE_HUB || !win) return;
     const s = getSettings();
     const name = (win.querySelector('#so-fixc-template') || {}).value || '';
     const blocked = fixHubShareBlockedReason(name, s, fixTplDirty);
@@ -7478,7 +7533,9 @@ async function openFixShare() {
     el.querySelector('#so-fixshare-desc').value = '';
     el.querySelector('#so-fixshare-model').value = '';
     el.querySelector('#so-fixshare-copybox').hidden = true;
+    el.querySelector('#so-fixshare-copy').classList.remove('so-fixshare-go');
     fixHubShowErrors(el, []);
+    el.querySelector('#so-fixshare-submit').hidden = !fixHubWorkerUrl();
     el.querySelector('#so-fixshare-tags').textContent = '';
     el._soTags = FIX_HUB_TAGS_FALLBACK;
     el._soKnown = null;
@@ -20485,8 +20542,10 @@ function injectWandButton() {
     menu.appendChild(soMarkEntryLive(rc));
 }
 
-// 手机「窗口归位」：把窗口复位到【居中 + 默认尺寸 380×540（夹进可见视口）】并存档。经魔棒菜单常驻项触发，故窗口
-// 即便被拖到屏外也救得回来（写绝对居中坐标、与当前位置无关；reset 用默认尺寸而非当前可能已拖坏的尺寸）。桌面项被
+// 手机「窗口归位」：把窗口复位到【居中 + 默认尺寸 380×540（夹进可见视口）】并存档；同时把「剧情引导」浮窗
+// （#so-plan-float）放回 CSS 默认的右上角（resetPlanFloatPosition）——用户报：浮窗被拖到右边缘后只露一条、拖不回来，
+// 而归位只救了主窗口（开着窗时浮窗是藏起来的，看不出问题；一关窗它又回到卡死的位置）。经魔棒菜单常驻项触发，故
+// 两者即便被拖到屏外也救得回来（写绝对坐标、与当前位置无关；reset 用默认尺寸而非当前可能已拖坏的尺寸）。桌面项被
 // CSS 隐藏、不会触发。
 function recenterWindow() {
     toggleWindow(true);                       // 关着 / 在屏外都先确保开着
@@ -20499,7 +20558,21 @@ function recenterWindow() {
     win.style.right = 'auto';
     const s = getSettings();                  // 存档：复位持久化（后续开窗不再回到坏位置 / 坏尺寸）
     s.winLeft = c.left; s.winTop = c.top; s.winWidth = c.width; s.winHeight = c.height;
+    resetPlanFloatPosition();                 // 一并复位引导浮窗；下面这一次 save() 同时落两份复位
     save();
+}
+
+// 把「剧情引导」浮窗的位置复位到 CSS 默认（top:64px; right:12px —— 恒在屏内）：清存档坐标 + 清内联几何。
+// 【不动】planFloatCollapsed：折叠成罗盘的仍是罗盘，只是回到够得着的地方。不 save()——由调用方统一存。
+function resetPlanFloatPosition() {
+    const s = getSettings();
+    s.planFloatLeft = null;
+    s.planFloatTop = null;
+    if (planFloat) {
+        planFloat.style.left = '';
+        planFloat.style.top = '';
+        planFloat.style.right = '';
+    }
 }
 
 // 用户功能请求：在 ST 聊天输入栏（#leftSendForm，紧挨 ☰ 菜单键）放一个一键开 / 关神谕侧窗的小按钮（🌙）。
@@ -20600,6 +20673,29 @@ function injectFixSelBarButton() {
     return true;
 }
 
+/* QR助手（uhhhh15/QR）兼容：它按【白名单】管 #qr--bar——用户没加白的容器 / 按钮一律挂 qrq-hidden-by-plugin
+   （display:none !important）、改由它自己的 🚀 菜单提供；我们的 ✂️ 落在某个快速回复集的容器里，那个集没加白就被
+   一起藏掉（用户报：勾了快捷按钮却看不见）。它公开了第三方登记表 window.qrAssistantExtensionApi（api.js
+   getThirdPartyRegistry，每次重建菜单 / 白名单都现读）：登记后 ✂️ 出现在 🚀 菜单「故事神谕」组下（点它 =
+   document.getElementById(dom_id).click()，元素 display:none 也照点 → 走我们原有的 click 处理），也能在它的
+   白名单里单独加白留在条上。没装 QR助手 = 没人读这个数组 = 行为逐字节不变。它每次都从数组重建，故关掉设置时
+   摘掉我们那条即可。按 dom_id 去重（init 与每次勾选都会调到这里）。 */
+function syncQrAssistantEntry(on) {
+    try {
+        const want = !!on && ENABLE_FIXSEL_CHAT_ENTRY && ENABLE_REPLY_FIX && ENABLE_FIX_SELECT;
+        let reg = window.qrAssistantExtensionApi;
+        if (!Array.isArray(reg)) {
+            if (!want) return;                         // 关着又没有登记表 → 什么都不造
+            reg = window.qrAssistantExtensionApi = [];
+        }
+        // 原地摘（别的扩展可能握着同一个数组引用）
+        for (let i = reg.length - 1; i >= 0; i--) {
+            if (reg[i] && reg[i].dom_id === FIXSEL_BAR_BTN_ID) reg.splice(i, 1);
+        }
+        if (want) reg.push({ dom_id: FIXSEL_BAR_BTN_ID, group_name: '故事神谕', button_name: '✂️ 选段校正' });
+    } catch (e) { /* 宿主异形 → 静默；登记失败只是少一个菜单入口 */ }
+}
+
 function removeFixSelBarButton() {
     const btn = document.getElementById(FIXSEL_BAR_BTN_ID);
     if (btn) btn.remove();
@@ -20629,7 +20725,8 @@ function stopFixSelBarObserver() {
 // 封顶 40 次（~20s）后放弃，绝不常驻空转。
 function syncFixSelBarButton() {
     if (fixSelBarTimer) { clearInterval(fixSelBarTimer); fixSelBarTimer = null; }
-    if (!getSettings().fixSelBarButton) { stopFixSelBarObserver(); removeFixSelBarButton(); return; }
+    if (!getSettings().fixSelBarButton) { stopFixSelBarObserver(); removeFixSelBarButton(); syncQrAssistantEntry(false); return; }
+    syncQrAssistantEntry(true);
     if (injectFixSelBarButton()) { startFixSelBarObserver(); return; }
     let attempts = 0;
     fixSelBarTimer = setInterval(() => {
@@ -20734,6 +20831,15 @@ function buildWindow() {
                             <option value="profile">连接配置文件</option>
                         </select>
                     </label>
+                    <label class="so-field"><span>提示词后处理</span>
+                        <select id="so-postproc">
+                            <option value="">未选择</option>
+                            <option value="merge">合并相同角色连续的发言</option>
+                            <option value="semi">半严格（强制对话角色交替）</option>
+                            <option value="strict">严格（强制对话角色交替、用户最先）</option>
+                        </select>
+                    </label>
+                    <div class="so-hint" id="so-postproc-hint">有些中转站只读第一段设定、把故事内容丢掉，AI 就会像没看过前文。遇到这种情况选「严格」。</div>
 
                     <div id="so-direct-fields">
                         <label class="so-field"><span>端点 URL</span>
@@ -21086,9 +21192,9 @@ function buildWindow() {
                     + '<button type="button" id="so-fixc-tpl-new" class="so-fix-run-btn">新建…</button>'
                     + '<button type="button" id="so-fixc-tpl-save" class="so-fix-run-btn">保存</button>'
                     + '<button type="button" id="so-fixc-tpl-del" class="so-fix-run-btn">删除</button>'
-                    // 🌐 模板广场（1.86.0）：旗关时这里是空串。📤 分享（2026-09-29 起只剩复制分享文本、纯本地）不受旗管。
+                    // 🌐 模板广场（1.86.0）：旗关时这里是空串——DOM 与 1.85.3 逐字节相同。
                     + (ENABLE_FIX_TEMPLATE_HUB ? '<button type="button" id="so-fixc-hub" class="so-fix-run-btn" title="浏览、下载大家分享的模板">🌐 广场</button>' : '')
-                    + '<button type="button" id="so-fixc-share" class="so-fix-run-btn" title="复制分享文本，发到神谕 Discord 的模板分享频道">📤 分享</button>'
+                    + (ENABLE_FIX_TEMPLATE_HUB ? '<button type="button" id="so-fixc-share" class="so-fix-run-btn" title="把当前模板分享到广场">📤 分享</button>' : '')
                     + '</div>'
                     // 「未保存」标记：fixTplDirty 的唯一可视化（updateFixTplDirtyMarker 是唯一写它的地方）。
                     // 默认 hidden——旗关时这一整段本就不渲染，旗开而不脏时它也不占视觉。
@@ -21766,6 +21872,7 @@ function bindControls() {
     bind('#so-stream', 'stream');
     bind('#so-direct-backend', 'directViaBackend'); // 1.17.23：经酒馆后端转发（避免直连 CORS）
     bind('#so-raw-url', 'directRawUrl');            // 1.22.0：地址原样使用（不自动补 /v1，原生化自二创「最终模式」）
+    bind('#so-postproc', 'promptPostProcessing', (v) => (SO_PROMPT_POSTPROC_TYPES.includes(v) ? v : ''));   // 🔀 提示词后处理（opt-in）
     // A6：连接预设 保存 / 加载 / 删除（端点 + 密钥 + 模型的命名快照）。加载时对字段派发 input 事件，走既有 bind 落地持久化。
     renderConnPresets();
     win.querySelector('#so-conn-preset-save').addEventListener('click', () => {
@@ -22180,11 +22287,11 @@ function bindControls() {
                 toastr.success(`已删除模板「${name}」`);
             }
         });
-        // 🌐 模板广场（1.86.0）：旗关时按钮根本没渲染，这里同门跳过。📤 分享恒在。
+        // 🌐 模板广场（1.86.0）：旗关时按钮根本没渲染，这里同门跳过。
         if (ENABLE_FIX_TEMPLATE_HUB) {
             win.querySelector('#so-fixc-hub').addEventListener('click', openFixHub);
+            win.querySelector('#so-fixc-share').addEventListener('click', () => { openFixShare(); });
         }
-        win.querySelector('#so-fixc-share').addEventListener('click', () => { openFixShare(); });
         win.querySelector('#so-fixc-mech').addEventListener('change', async (e) => {
             if (!e.target.checked && !getSettings().customFixWarned) {
                 const ok = await uiConfirm('关掉后，状态栏 / 变量块也会一起交给模板，模板输出会原样替换整条回复。原文仍留在 swipe 0。确定？');
@@ -22305,6 +22412,7 @@ function loadSettingsIntoForm() {
     win.querySelector('#so-stream').checked = !!s.stream;
     win.querySelector('#so-direct-backend').checked = !!s.directViaBackend; // 1.17.23：经酒馆后端转发
     win.querySelector('#so-raw-url').checked = !!s.directRawUrl;            // 1.22.0：地址原样使用
+    win.querySelector('#so-postproc').value = SO_PROMPT_POSTPROC_TYPES.includes(s.promptPostProcessing) ? s.promptPostProcessing : '';   // 🔀 提示词后处理
 
     win.querySelector('#so-temp').value = s.temperature;
     win.querySelector('#so-maxtok').value = s.maxTokens;
@@ -25180,6 +25288,7 @@ function placePlanBar() {
         if (planBarEl.parentElement !== planFloatSlot) planFloatSlot.appendChild(planBarEl);
         planFloat.style.display = 'flex';
         applyPlanFloatCollapsed(); // refresh pill tooltip (plan may have changed)
+        ensurePlanFloatInView();   // 显示之后才量得到尺寸（且要按折叠 / 展开后的真实大小量）
     } else {
         if (planFloat) planFloat.style.display = 'none';
         if (planBarEl.parentElement !== win) {
@@ -33394,14 +33503,57 @@ function mergeAdjacentSameRole(messages, sep = '\n\n') {
     return changed ? out : messages;
 }
 
-// FIX 1+2 出站咽喉：直连体（body.messages）与配置文件（messages 数组）各自的形状包装。先消毒（良构）再合并同角色。
+// 🔀 提示词后处理（opt-in）：照抄 ST src/prompt-converters.js mergeMessages 的 merge / semi / strict 三档
+// （prompt-postproc.test.mjs 直接 import ST 真身逐项对拍）。为什么要有：部分中转（literouter gemini 实测）
+// 只读【第一条】system，领头第二条 / 对话中间的 system 静默丢弃——内置破限把故事上下文放在第二条 system，
+// 预设路更是 system 穿插 → 模型「看不到前文」且不报错。
+//   merge  = 相邻同角色合并（含 system）
+//   semi   = merge + 除第一条外的 system 一律改成 user，再合并
+//   strict = semi + 「用户最先」：system 后面不是 user（或开头不是 system/user）时插 ST 默认占位 user
+// 刻意不做：ST 的 single（给每条加角色名前缀——神谕的 AI 不是角色卡）与 *_tools 变体（神谕不发工具）。
+// 非字符串 content（多模态数组）原样不并、不改。未知 / 空档 → 返回同一引用（出站字节不变）。纯函数、不改入参。
+const SO_PROMPT_POSTPROC_TYPES = ['merge', 'semi', 'strict'];
+const SO_PROMPT_PLACEHOLDER = "Let's get started.";   // ST config.yaml promptPlaceholder 的出厂默认
+function soPostProcessMessages(messages, type, placeholder = SO_PROMPT_PLACEHOLDER) {
+    if (!Array.isArray(messages) || !SO_PROMPT_POSTPROC_TYPES.includes(type)) return messages;
+    const squash = (list) => {
+        const out = [];
+        for (const m of list) {
+            const prev = out[out.length - 1];
+            if (prev && m && prev.role === m.role && typeof prev.content === 'string' && typeof m.content === 'string' && m.content) {
+                out[out.length - 1] = { ...prev, content: prev.content + '\n\n' + m.content };
+            } else {
+                out.push(m && typeof m === 'object' ? { ...m } : m);
+            }
+        }
+        if (out.length === 0) out.push({ role: 'user', content: placeholder });
+        return out;
+    };
+    let out = squash(messages);
+    if (type === 'merge') return out;
+    out = out.map((m, i) => (i > 0 && m && m.role === 'system') ? { ...m, role: 'user' } : m);
+    if (type === 'strict' && out.length) {
+        if (out[0].role === 'system' && (out.length === 1 || out[1].role !== 'user')) {
+            out.splice(1, 0, { role: 'user', content: placeholder });
+        } else if (out[0].role !== 'system' && out[0].role !== 'user') {
+            out.unshift({ role: 'user', content: placeholder });
+        }
+    }
+    return squash(out);
+}
+function soPromptPostProcType() {
+    try { return String(getSettings().promptPostProcessing || ''); } catch (e) { return ''; }
+}
+
+// FIX 1+2 出站咽喉：直连体（body.messages）与配置文件（messages 数组）各自的形状包装。先消毒（良构）→
+// 提示词后处理（opt-in，未选择 = 同一引用）→ 合并同角色。
 function normalizeOutgoingBody(body) {
     if (!body || !Array.isArray(body.messages)) return body;
-    const messages = mergeAdjacentSameRole(sanitizeMessages(body.messages));
+    const messages = mergeAdjacentSameRole(soPostProcessMessages(sanitizeMessages(body.messages), soPromptPostProcType()));
     return messages === body.messages ? body : { ...body, messages };
 }
 function normalizeOutgoingMessages(messages) {
-    return mergeAdjacentSameRole(sanitizeMessages(messages));
+    return mergeAdjacentSameRole(soPostProcessMessages(sanitizeMessages(messages), soPromptPostProcType()));
 }
 
 // FIX 3（cause C）：把一行 SSE 的 data 载荷分类。中转会在 HTTP 200 的流里中途插一个 error 块
@@ -35617,7 +35769,28 @@ let _ensureInViewPending = false;
 function scheduleEnsureInView() {
     if (_ensureInViewPending) return;
     _ensureInViewPending = true;
-    requestAnimationFrame(() => { _ensureInViewPending = false; ensureWindowInView(); });
+    requestAnimationFrame(() => { _ensureInViewPending = false; ensureWindowInView(); ensurePlanFloatInView(); });
+}
+
+// 「剧情引导」浮窗的自愈（与 ensureWindowInView 同一策略：只做显示级贴合、【不 save()】，存档坐标原样保留）。
+// 浮窗现在还够得着（boxIsReachable：留在屏内的一块 ≥ 140×48，或折叠药丸整颗在屏内）→ 一个字节都不动；
+// 够不着（拖到边缘只剩一条 / 旋屏 / 换了更窄的屏）→ 用拖动同款 clampDragPos 拉回来。
+// 不在 ensurePlanFloat 里收紧那条 60/40 恢复夹取：创建时浮窗是 display:none、量不到；一刀切的更严夹取
+// 还会把本来贴边贴得好好的折叠罗盘（~40px 宽）拽离边缘。
+function ensurePlanFloatInView() {
+    if (!planFloat || planFloat.style.display === 'none') return;
+    const r = planFloat.getBoundingClientRect();
+    const box = { left: r.left, top: r.top, width: r.width, height: r.height };
+    // 判与夹用同一个坐标系（clampDragPos 不认 visualViewport 偏移）：否则 iOS 键盘把页面顶上去时，
+    // 一颗好好的浮窗会被判「够不着」、再被写成同一位置的内联坐标（丢掉 CSS 默认的 right:12px 锚定）。
+    const cv = currentView();
+    const view = { w: cv.w, h: cv.h };
+    if (boxIsReachable(box, view)) return;
+    const p = clampDragPos(box, view);
+    if (p.left === box.left && p.top === box.top) return;   // 夹完没变 → 不碰 DOM
+    planFloat.style.left = `${p.left}px`;
+    planFloat.style.top = `${p.top}px`;
+    planFloat.style.right = 'auto';
 }
 
 // Drag the window by its header. Pointer events cover mouse + touch + pen in one
